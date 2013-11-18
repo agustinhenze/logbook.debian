@@ -1,0 +1,15 @@
+.ropeproject
+.tox
+docs/_build
+logbook/_speedups.c
+logbook/_speedups.so
+Logbook.egg-info
+dist
+*.pyc
+env
+env*
+.coverage
+cover
+build
+.vagrant
+flycheck-*
