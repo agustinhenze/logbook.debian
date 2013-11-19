@@ -220,5 +220,5 @@ man_pages = [
 ]
 
 intersphinx_mapping = {
-    'http://docs.python.org': None
+    'python': ('/usr/share/doc/python2.7/html', None),
 }
