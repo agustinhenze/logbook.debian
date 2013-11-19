@@ -1,0 +1,53 @@
+Source: logbook
+Section: python
+Priority: optional
+Maintainer: Agustin Henze <tin@debian.org>
+Build-Depends:
+ debhelper (>= 9),
+ dh-python,
+ python-all,
+ python-setuptools,
+ python3-all,
+ python3-setuptools,
+ python-sphinx (>= 1.0.7+dfsg) | python3-sphinx,
+ python-docutils,
+Standards-Version: 3.9.5
+X-Python-Version: >= 2.6
+X-Python3-Version: >= 3.2
+Homepage: http://pythonhosted.org/Logbook/
+Vcs-Git: git://anonscm.debian.org/collab-maint/logbook.git
+Vcs-Browser: http://anonscm.debian.org/gitweb/?p=collab-maint/logbook.git
+
+Package: python-logbook
+Architecture: all
+Depends: ${python:Depends}, ${misc:Depends}
+Suggests: python-logbook-doc,
+Description: logging system for Python that replaces the standard library's module
+ Logbook is a logging system for Python that replaces the standard library's
+ logging module. It was designed with both complex and simple applications in
+ mind and the idea to make logging fun
+ .
+ This is the Python 2 version of the package.
+
+Package: python3-logbook
+Architecture: all
+Depends: ${python3:Depends}, ${misc:Depends}
+Suggests: python-logbook-doc,
+Description: logging system for Python that replaces the standard library's module (Python3)
+ Logbook is a logging system for Python that replaces the standard library's
+ logging module. It was designed with both complex and simple applications in
+ mind and the idea to make logging fun
+ .
+ This is the Python 3 version of the package.
+
+Package: python-logbook-doc
+Architecture: all
+Depends: ${misc:Depends}, ${sphinxdoc:Depends}
+Suggests: python-doc
+Section: doc
+Description: logging system for Python that replaces the standard library's module (doc)
+ Logbook is a logging system for Python that replaces the standard library's
+ logging module. It was designed with both complex and simple applications in
+ mind and the idea to make logging fun
+ .
+ This package contains API documentation.

@@ -1,0 +1,5 @@
+logbook (0.6.0-1) unstable; urgency=low
+
+  * Initial release (Closes: #596042).
+
+ -- Agustin Henze <tin@debian.org>  Mon, 18 Nov 2013 20:01:13 -0300

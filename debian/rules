@@ -1,0 +1,29 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+# Uncomment this to turn on verbose mode.
+# export DH_VERBOSE=1
+
+UVERSION := $(shell dpkg-parsechangelog | sed -n -e's/^Version: \(.*\)-[^-]\+/\1/p' | cut -d ":" -f 2)
+PACKAGE_NAME := $(shell dpkg-parsechangelog | sed -n -e's/^Source: \(.*\)\+/\1/p')
+export PYBUILD_NAME=$(PACKAGE_NAME)
+
+%:
+	dh $@ --with python2,python3,sphinxdoc --buildsystem=pybuild
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf docs/_build
+
+override_dh_auto_install:
+	dh_auto_install
+	# build the html pages for the -doc package
+	python setup.py build_sphinx -b html
+
+get-orig-source:
+	@if [ ! -d "debian" ] ; then \
+		echo 'Run this from the top directory of the Debian source' >&2; \
+		exit 1; \
+	fi
+	wget https://github.com/mitsuhiko/logbook/archive/$(UVERSION).tar.gz \
+		-O ../logbook_$(UVERSION).orig.tar.gz;

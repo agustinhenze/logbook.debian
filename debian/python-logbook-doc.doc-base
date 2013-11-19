@@ -1,0 +1,10 @@
+Document: python-logbook-reference-manual
+Title: Python Logbook Library Reference Manual
+Author: Logbook Team, see AUTHORS for more details
+Abstract: Logbook is a logging system for Python that replaces the standard
+ library's logging module
+Section: Programming/Python
+
+Format: HTML
+Index: /usr/share/doc/python-logbook-doc/html/index.html
+Files: /usr/share/doc/python-logbook-doc/html/*
