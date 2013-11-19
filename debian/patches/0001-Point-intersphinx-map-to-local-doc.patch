@@ -1,0 +1,19 @@
+From: Agustin Henze <tin@sluc.org.ar>
+Date: Tue, 19 Nov 2013 17:05:58 -0300
+Subject: Point intersphinx map to local doc
+
+---
+ docs/conf.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/docs/conf.py b/docs/conf.py
+index 03a6628..4b14a94 100644
+--- a/docs/conf.py
++++ b/docs/conf.py
+@@ -220,5 +220,5 @@ man_pages = [
+ ]
+ 
+ intersphinx_mapping = {
+-    'http://docs.python.org': None
++    'python': ('/usr/share/doc/python2.7/html', None),
+ }
