@@ -28,6 +28,7 @@ try:
     from thread import get_ident
 except ImportError:
     from _thread import get_ident
+import base64
 
 __file_without_pyc__ = __file__
 if __file_without_pyc__.endswith(".pyc"):
@@ -253,7 +254,7 @@ class _HandlerTestCase(LogbookTestCase):
     def test_file_handler_unicode(self):
         with capturing_stderr_context() as captured:
             with self.thread_activation_strategy(logbook.FileHandler(self.filename)) as h:
-                self.log.info(u'\u0431')
+                self.log.info(u('\u0431'))
         self.assertFalse(captured.getvalue())
 
     def test_file_handler_delay(self):
@@ -352,7 +353,7 @@ class _HandlerTestCase(LogbookTestCase):
             self.assertEqual(f.readline().rstrip(), '[02:00] Third One')
 
     def test_mail_handler(self):
-        subject = u'\xf8nicode'
+        subject = u('\xf8nicode')
         handler = make_fake_mail_handler(subject=subject)
         with capturing_stderr_context() as fallback:
             with self.thread_activation_strategy(handler):
@@ -360,7 +361,7 @@ class _HandlerTestCase(LogbookTestCase):
                 try:
                     1 / 0
                 except Exception:
-                    self.log.exception(u'Viva la Espa\xf1a')
+                    self.log.exception(u('Viva la Espa\xf1a'))
 
             if not handler.mails:
                 # if sending the mail failed, the reason should be on stderr
@@ -371,16 +372,19 @@ class _HandlerTestCase(LogbookTestCase):
             mail = mail.replace("\r", "")
             self.assertEqual(sender, handler.from_addr)
             self.assert_('=?utf-8?q?=C3=B8nicode?=' in mail)
-            self.assertRegexpMatches(mail, 'Message type:\s+ERROR')
-            self.assertRegexpMatches(mail, 'Location:.*%s' % __file_without_pyc__)
-            self.assertRegexpMatches(mail, 'Module:\s+%s' % __name__)
-            self.assertRegexpMatches(mail, 'Function:\s+test_mail_handler')
-            body = u'Message:\n\nViva la Espa\xf1a'
+            header, data = mail.split("\n\n", 1)
+            if "Content-Transfer-Encoding: base64" in header:
+                data = base64.b64decode(data).decode("utf-8")
+            self.assertRegexpMatches(data, 'Message type:\s+ERROR')
+            self.assertRegexpMatches(data, 'Location:.*%s' % __file_without_pyc__)
+            self.assertRegexpMatches(data, 'Module:\s+%s' % __name__)
+            self.assertRegexpMatches(data, 'Function:\s+test_mail_handler')
+            body = u('Viva la Espa\xf1a')
             if sys.version_info < (3, 0):
                 body = body.encode('utf-8')
-            self.assertIn(body, mail)
-            self.assertIn('\n\nTraceback (most', mail)
-            self.assertIn('1 / 0', mail)
+            self.assertIn(body, data)
+            self.assertIn('\nTraceback (most', data)
+            self.assertIn('1 / 0', data)
             self.assertIn('This is not mailed', fallback.getvalue())
 
     def test_mail_handler_record_limits(self):
@@ -478,8 +482,8 @@ class _HandlerTestCase(LogbookTestCase):
                     except socket.error:
                         self.fail('got timeout on socket')
                     self.assertEqual(rv, (
-                        u'<12>%stestlogger: Syslog is weird\x00' %
-                        (app_name and app_name + u':' or u'')).encode('utf-8'))
+                        u('<12>%stestlogger: Syslog is weird\x00') %
+                        (app_name and app_name + u(':') or u(''))).encode('utf-8'))
 
     def test_handler_processors(self):
         handler = make_fake_mail_handler(format_string='''\
@@ -679,6 +683,22 @@ Message:
         self.assertFalse(handler.has_warning('bar', channel='Logger2'))
         self.assertFalse(outer_handler.has_warning('foo', channel='Logger1'))
         self.assert_(outer_handler.has_warning('bar', channel='Logger2'))
+
+    def test_null_handler_filtering(self):
+        logger1 = logbook.Logger("1")
+        logger2 = logbook.Logger("2")
+        outer = logbook.TestHandler()
+        inner = logbook.NullHandler()
+
+        inner.filter = lambda record, handler: record.dispatcher is logger1
+
+        with self.thread_activation_strategy(outer):
+            with self.thread_activation_strategy(inner):
+                logger1.warn("1")
+                logger2.warn("2")
+
+        self.assertTrue(outer.has_warning("2", channel="2"))
+        self.assertFalse(outer.has_warning("1", channel="1"))
 
     def test_different_context_pushing(self):
         h1 = logbook.TestHandler(level=logbook.DEBUG)
@@ -890,25 +910,36 @@ class DefaultConfigurationTestCase(LogbookTestCase):
 
 class LoggingCompatTestCase(LogbookTestCase):
 
-    def test_basic_compat(self):
-        from logging import getLogger
+    def test_basic_compat_with_level_setting(self):
+        self._test_basic_compat(True)
+    def test_basic_compat_without_level_setting(self):
+        self._test_basic_compat(False)
+
+    def _test_basic_compat(self, set_root_logger_level):
+        import logging
         from logbook.compat import redirected_logging
 
+        # mimic the default logging setting
+        self.addCleanup(logging.root.setLevel, logging.root.level)
+        logging.root.setLevel(logging.WARNING)
+
         name = 'test_logbook-%d' % randrange(1 << 32)
-        logger = getLogger(name)
-        with capturing_stderr_context() as captured:
-            redirector = redirected_logging()
-            redirector.start()
-            try:
-                logger.debug('This is from the old system')
-                logger.info('This is from the old system')
-                logger.warn('This is from the old system')
-                logger.error('This is from the old system')
-                logger.critical('This is from the old system')
-            finally:
-                redirector.end()
+        logger = logging.getLogger(name)
+
+        with logbook.TestHandler(bubble=True) as handler:
+            with capturing_stderr_context() as captured:
+                with redirected_logging(set_root_logger_level):
+                    logger.debug('This is from the old system')
+                    logger.info('This is from the old system')
+                    logger.warn('This is from the old system')
+                    logger.error('This is from the old system')
+                    logger.critical('This is from the old system')
             self.assertIn(('WARNING: %s: This is from the old system' % name),
                           captured.getvalue())
+        if set_root_logger_level:
+            self.assertEquals(handler.records[0].level, logbook.DEBUG)
+        else:
+            self.assertEquals(handler.records[0].level, logbook.WARNING)
 
     def test_redirect_logbook(self):
         import logging
@@ -1081,20 +1112,34 @@ class MoreTestCase(LogbookTestCase):
             self.assertIn('WARNING: testlogger: here i am', caught.exception.args[0])
         self.assertIn('this is irrelevant', test_handler.records[0].message)
 
+    def test_dedup_handler(self):
+        from logbook.more import DedupHandler
+        with logbook.TestHandler() as test_handler:
+            with DedupHandler():
+                self.log.info('foo')
+                self.log.info('bar')
+                self.log.info('foo')
+        self.assertEqual(2, len(test_handler.records))
+        self.assertIn('message repeated 2 times: foo', test_handler.records[0].message)
+        self.assertIn('message repeated 1 times: bar', test_handler.records[1].message)
+
 class QueuesTestCase(LogbookTestCase):
-    def _get_zeromq(self):
+    def _get_zeromq(self, multi=False):
         from logbook.queues import ZeroMQHandler, ZeroMQSubscriber
 
         # Get an unused port
         tempsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tempsock.bind(('localhost', 0))
+        tempsock.bind(('127.0.0.1', 0))
         host, unused_port = tempsock.getsockname()
         tempsock.close()
 
         # Retrieve the ZeroMQ handler and subscriber
         uri = 'tcp://%s:%d' % (host, unused_port)
-        handler = ZeroMQHandler(uri)
-        subscriber = ZeroMQSubscriber(uri)
+        if multi:
+            handler = [ZeroMQHandler(uri, multi=True) for _ in range(3)]
+        else:
+            handler = ZeroMQHandler(uri)
+        subscriber = ZeroMQSubscriber(uri, multi=multi)
         # Enough time to start
         time.sleep(0.1)
         return handler, subscriber
@@ -1102,9 +1147,9 @@ class QueuesTestCase(LogbookTestCase):
     @require_module('zmq')
     def test_zeromq_handler(self):
         tests = [
-            u'Logging something',
-            u'Something with umlauts äöü',
-            u'Something else for good measure',
+            u('Logging something'),
+            u('Something with umlauts äöü'),
+            u('Something else for good measure'),
         ]
         handler, subscriber = self._get_zeromq()
         for test in tests:
@@ -1113,6 +1158,22 @@ class QueuesTestCase(LogbookTestCase):
                 record = subscriber.recv()
                 self.assertEqual(record.message, test)
                 self.assertEqual(record.channel, self.log.name)
+
+    @require_module('zmq')
+    def test_multi_zeromq_handler(self):
+        tests = [
+            u('Logging something'),
+            u('Something with umlauts äöü'),
+            u('Something else for good measure'),
+        ]
+        handlers, subscriber = self._get_zeromq(multi=True)
+        for handler in handlers:
+            for test in tests:
+                with handler:
+                    self.log.warn(test)
+                    record = subscriber.recv()
+                    self.assertEqual(record.message, test)
+                    self.assertEqual(record.channel, self.log.name)
 
     @require_module('zmq')
     def test_zeromq_background_thread(self):
@@ -1127,7 +1188,7 @@ class QueuesTestCase(LogbookTestCase):
         # stop the controller.  This will also stop the loop and join the
         # background process.  Before that we give it a fraction of a second
         # to get all results
-        time.sleep(0.1)
+        time.sleep(0.2)
         controller.stop()
 
         self.assertTrue(test_handler.has_warning('This is a warning'))
@@ -1347,16 +1408,16 @@ class HelperTestCase(LogbookTestCase):
         rv = to_safe_json([
             None,
             'foo',
-            u'jäger',
+            u('jäger'),
             1,
             datetime(2000, 1, 1),
-            {'jäger1': 1, u'jäger2': 2, Bogus(): 3, 'invalid': object()},
+            {'jäger1': 1, u('jäger2'): 2, Bogus(): 3, 'invalid': object()},
             object()  # invalid
         ])
         self.assertEqual(
-            rv, [None, u'foo', u'jäger', 1, '2000-01-01T00:00:00Z',
-                 {u('jäger1'): 1, u'jäger2': 2, u'bogus': 3,
-                  u'invalid': None}, None])
+            rv, [None, u('foo'), u('jäger'), 1, '2000-01-01T00:00:00Z',
+                 {u('jäger1'): 1, u('jäger2'): 2, u('bogus'): 3,
+                  u('invalid'): None}, None])
 
     def test_datehelpers(self):
         from logbook.helpers import format_iso8601, parse_iso8601

@@ -10,13 +10,14 @@
 """
 import re
 import os
+from collections import defaultdict
 from cgi import parse_qsl
 
-from logbook.base import RecordDispatcher, NOTSET, ERROR, NOTICE
+from logbook.base import RecordDispatcher, dispatch_record, NOTSET, ERROR, NOTICE
 from logbook.handlers import Handler, StringFormatter, \
      StringFormatterHandlerMixin, StderrHandler
 from logbook._termcolors import colorize
-from logbook.helpers import PY2, string_types, iteritems
+from logbook.helpers import PY2, string_types, iteritems, u
 
 from logbook.ticketing import TicketingHandler as DatabaseHandler
 from logbook.ticketing import BackendBase
@@ -28,7 +29,7 @@ else:
 
 _ws_re = re.compile(r'(\s+)(?u)')
 TWITTER_FORMAT_STRING = \
-u'[{record.channel}] {record.level_name}: {record.message}'
+u('[{record.channel}] {record.level_name}: {record.message}')
 TWITTER_ACCESS_TOKEN_URL = 'https://twitter.com/oauth/access_token'
 NEW_TWEET_URL = 'https://api.twitter.com/1/statuses/update.json'
 
@@ -39,7 +40,7 @@ class CouchDBBackend(BackendBase):
     def setup_backend(self):
         from couchdb import Server
 
-        uri = self.options.pop('uri', u'')
+        uri = self.options.pop('uri', u(''))
         couch = Server(uri)
         db_name = self.options.pop('db')
         self.database = couch[db_name]
@@ -63,8 +64,8 @@ class TwitterFormatter(StringFormatter):
     max_length = 140
 
     def format_exception(self, record):
-        return u'%s: %s' % (record.exception_shortname,
-                            record.exception_message)
+        return u('%s: %s') % (record.exception_shortname,
+                              record.exception_message)
 
     def __call__(self, record, handler):
         formatted = StringFormatter.__call__(self, record, handler)
@@ -74,10 +75,10 @@ class TwitterFormatter(StringFormatter):
             length += len(piece)
             if length > self.max_length:
                 if length - len(piece) < self.max_length:
-                    rv.append(u'…')
+                    rv.append(u('…'))
                 break
             rv.append(piece)
-        return u''.join(rv)
+        return u('').join(rv)
 
 
 class TaggingLogger(RecordDispatcher):
@@ -357,3 +358,51 @@ class ExceptionHandler(Handler, StringFormatterHandlerMixin):
         if self.should_handle(record):
             raise self.exc_type(self.format(record))
         return False
+
+class DedupHandler(Handler):
+    """A handler that deduplicates log messages.
+
+    It emits each unique log record once, along with the number of times it was emitted.
+    Example:::
+
+        with logbook.more.DedupHandler():
+            logbook.error('foo')
+            logbook.error('bar')
+            logbook.error('foo')
+
+    The expected output:::
+
+       message repeated 2 times: foo
+       message repeated 1 times: bar
+    """
+    def __init__(self, format_string='message repeated {count} times: {message}', *args, **kwargs):
+        Handler.__init__(self, bubble=False, *args, **kwargs)
+        self._format_string = format_string
+        self.clear()
+        
+    def clear(self):
+        self._message_to_count = defaultdict(int)
+        self._unique_ordered_records = []
+
+    def pop_application(self):
+        Handler.pop_application(self)
+        self.flush()
+
+    def pop_thread(self):
+        Handler.pop_thread(self)
+        self.flush()
+
+    def handle(self, record):
+        if not record.message in self._message_to_count:
+            self._unique_ordered_records.append(record)
+        self._message_to_count[record.message] += 1
+        return True
+
+    def flush(self):
+        for record in self._unique_ordered_records:
+            record.message = self._format_string.format(message=record.message, count=self._message_to_count[record.message])
+            # record.dispatcher is the logger who created the message, it's sometimes supressed (by logbook.info for example)
+            dispatch = record.dispatcher.call_handlers if record.dispatcher is not None else dispatch_record
+            dispatch(record)
+        self.clear()
+
