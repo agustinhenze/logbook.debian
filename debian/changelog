@@ -1,3 +1,10 @@
+logbook (0.7.0-1) unstable; urgency=medium
+
+  * Use uscan for get-orig-source target instead of wget
+  * Imported Upstream version 0.7.0
+
+ -- Agustin Henze <tin@debian.org>  Fri, 13 Jun 2014 20:39:04 -0300
+
 logbook (0.6.0-1) unstable; urgency=low
 
   * Initial release (Closes: #596042).
