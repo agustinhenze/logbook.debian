@@ -147,10 +147,10 @@ class ExtraDict(dict):
             try:
                 return dict.__getitem__(self, key)
             except KeyError:
-                return u''
+                return u('')
     else:
         def __missing__(self, key):
-            return u''
+            return u('')
 
     def copy(self):
         return self.__class__(self)
@@ -474,6 +474,7 @@ class LogRecord(object):
         self._channel = None
         if isinstance(self.time, string_types):
             self.time = parse_iso8601(self.time)
+        self.extra = ExtraDict(self.extra)
         return self
 
     @cached_property
@@ -842,6 +843,15 @@ class RecordDispatcher(object):
             if not handler.should_handle(record):
                 continue
 
+            # a filter can still veto the handling of the record.  This
+            # however is already operating on an initialized and processed
+            # record.  The impact is that filters are slower than the
+            # handler's should_handle function in case there is no default
+            # handler that would handle the record (delayed init).
+            if handler.filter is not None \
+               and not handler.filter(record, handler):
+                continue
+
             # if this is a blackhole handler, don't even try to
             # do further processing, stop right away.  Technically
             # speaking this is not 100% correct because if the handler
@@ -862,15 +872,6 @@ class RecordDispatcher(object):
                 record.heavy_init()
                 self.process_record(record)
                 record_initialized = True
-
-            # a filter can still veto the handling of the record.  This
-            # however is already operating on an initialized and processed
-            # record.  The impact is that filters are slower than the
-            # handler's should_handle function in case there is no default
-            # handler that would handle the record (delayed init).
-            if handler.filter is not None \
-               and not handler.filter(record, handler):
-                continue
 
             # handle the record.  If the record was handled and
             # the record is not bubbling we can abort now.

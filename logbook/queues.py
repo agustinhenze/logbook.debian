@@ -14,7 +14,7 @@ from threading import Thread, Lock
 import platform
 from logbook.base import NOTSET, LogRecord, dispatch_record
 from logbook.handlers import Handler, WrapperHandler
-from logbook.helpers import PY2
+from logbook.helpers import PY2, u
 
 if PY2:
     from Queue import Empty, Queue as ThreadQueue
@@ -31,7 +31,7 @@ class RedisHandler(Handler):
 
     Example setup::
 
-        handler = RedisHandler('http://localhost', port='9200', key='redis')
+        handler = RedisHandler('http://127.0.0.1', port='9200', key='redis')
 
     If your Redis instance is password protected, you can securely connect passing
     your password when creating a RedisHandler object.
@@ -42,7 +42,7 @@ class RedisHandler(Handler):
 
     More info about the default buffer size: wp.me/p3tYJu-3b
     """
-    def __init__(self, host='localhost', port=6379, key='redis', extra_fields={},
+    def __init__(self, host='127.0.0.1', port=6379, key='redis', extra_fields={},
                 flush_threshold=128, flush_time=1, level=NOTSET, filter=None,
                 password=False, bubble=True, context=None):
         Handler.__init__(self, level, filter, bubble)
@@ -120,20 +120,20 @@ class RedisHandler(Handler):
         self._flush_buffer()
 
 
-class RabbitMQHandler(Handler):
-    """A handler that acts as a RabbitMQ publisher, which publishes each record
-    as json dump.  Requires the kombu module.
+class MessageQueueHandler(Handler):
+    """A handler that acts as a message queue publisher, which publishes each
+    record as json dump. Requires the kombu module.
 
     The queue will be filled with JSON exported log records.  To receive such
-    log records from a queue you can use the :class:`RabbitMQSubscriber`.
-
+    log records from a queue you can use the :class:`MessageQueueSubscriber`.
 
     Example setup::
 
-        handler = RabbitMQHandler('amqp://guest:guest@localhost//', queue='my_log')
+        handler = MessageQueueHandler('mongodb://localhost:27017/logging')
     """
+
     def __init__(self, uri=None, queue='logging', level=NOTSET,
-                filter=None, bubble=False, context=None):
+                 filter=None, bubble=False, context=None):
         Handler.__init__(self, level, filter, bubble)
         try:
             import kombu
@@ -157,12 +157,20 @@ class RabbitMQHandler(Handler):
         self.queue.close()
 
 
+RabbitMQHandler = MessageQueueHandler
+
+
 class ZeroMQHandler(Handler):
     """A handler that acts as a ZeroMQ publisher, which publishes each record
     as json dump.  Requires the pyzmq library.
 
     The queue will be filled with JSON exported log records.  To receive such
     log records from a queue you can use the :class:`ZeroMQSubscriber`.
+
+    If `multi` is set to `True`, the handler will use a `PUSH` socket to
+    publish the records. This allows multiple handlers to use the same `uri`.
+    The records can be received by using the :class:`ZeroMQSubscriber` with
+    `multi` set to `True`.
 
 
     Example setup::
@@ -171,7 +179,7 @@ class ZeroMQHandler(Handler):
     """
 
     def __init__(self, uri=None, level=NOTSET, filter=None, bubble=False,
-                 context=None):
+                 context=None, multi=False):
         Handler.__init__(self, level, filter, bubble)
         try:
             import zmq
@@ -180,10 +188,18 @@ class ZeroMQHandler(Handler):
                                'the ZeroMQHandler.')
         #: the zero mq context
         self.context = context or zmq.Context()
-        #: the zero mq socket.
-        self.socket = self.context.socket(zmq.PUB)
-        if uri is not None:
-            self.socket.bind(uri)
+
+        if multi:
+            #: the zero mq socket.
+            self.socket = self.context.socket(zmq.PUSH)
+            if uri is not None:
+                self.socket.connect(uri)
+        else:
+            #: the zero mq socket.
+            self.socket = self.context.socket(zmq.PUB)
+            if uri is not None:
+                self.socket.bind(uri)
+
 
     def export_record(self, record):
         """Exports the record into a dictionary ready for JSON dumping."""
@@ -275,27 +291,27 @@ class SubscriberBase(object):
         return controller
 
 
-class RabbitMQSubscriber(SubscriberBase):
-    """A helper that acts as RabbitMQ subscriber and will dispatch received
-    log records to the active handler setup.  There are multiple ways to
-    use this class.
+class MessageQueueSubscriber(SubscriberBase):
+    """A helper that acts as a message queue subscriber and will dispatch
+    received log records to the active handler setup. There are multiple ways
+    to use this class.
 
     It can be used to receive log records from a queue::
 
-        subscriber = RabbitMQSubscriber('amqp://guest:guest@localhost//')
+        subscriber = MessageQueueSubscriber('mongodb://localhost:27017/logging')
         record = subscriber.recv()
 
     But it can also be used to receive and dispatch these in one go::
 
         with target_handler:
-            subscriber = RabbitMQSubscriber('amqp://guest:guest@localhost//')
+            subscriber = MessageQueueSubscriber('mongodb://localhost:27017/logging')
             subscriber.dispatch_forever()
 
     This will take all the log records from that queue and dispatch them
     over to `target_handler`.  If you want you can also do that in the
     background::
 
-        subscriber = RabbitMQSubscriber('amqp://guest:guest@localhost//')
+        subscriber = MessageQueueSubscriber('mongodb://localhost:27017/logging')
         controller = subscriber.dispatch_in_background(target_handler)
 
     The controller returned can be used to shut down the background
@@ -303,13 +319,11 @@ class RabbitMQSubscriber(SubscriberBase):
 
         controller.stop()
     """
-
     def __init__(self, uri=None, queue='logging'):
         try:
             import kombu
         except ImportError:
-            raise RuntimeError('The kombu library is required for '
-                               'the RabbitMQSubscriber.')
+            raise RuntimeError('The kombu library is required.')
         if uri:
             connection = kombu.Connection(uri)
 
@@ -344,6 +358,9 @@ class RabbitMQSubscriber(SubscriberBase):
         return LogRecord.from_dict(log_record)
 
 
+RabbitMQSubscriber = MessageQueueSubscriber
+
+
 class ZeroMQSubscriber(SubscriberBase):
     """A helper that acts as ZeroMQ subscriber and will dispatch received
     log records to the active handler setup.  There are multiple ways to
@@ -371,9 +388,14 @@ class ZeroMQSubscriber(SubscriberBase):
     thread::
 
         controller.stop()
+
+    If `multi` is set to `True`, the subscriber will use a `PULL` socket
+    and listen to records published by a `PUSH` socket (usually via a
+    :class:`ZeroMQHandler` with `multi` set to `True`). This allows a
+    single subscriber to dispatch multiple handlers.
     """
 
-    def __init__(self, uri=None, context=None):
+    def __init__(self, uri=None, context=None, multi=False):
         try:
             import zmq
         except ImportError:
@@ -383,11 +405,18 @@ class ZeroMQSubscriber(SubscriberBase):
 
         #: the zero mq context
         self.context = context or zmq.Context()
-        #: the zero mq socket.
-        self.socket = self.context.socket(zmq.SUB)
-        if uri is not None:
-            self.socket.connect(uri)
-        self.socket.setsockopt_unicode(zmq.SUBSCRIBE, u'')
+
+        if multi:
+            #: the zero mq socket.
+            self.socket = self.context.socket(zmq.PULL)
+            if uri is not None:
+                self.socket.bind(uri)
+        else:
+            #: the zero mq socket.
+            self.socket = self.context.socket(zmq.SUB)
+            if uri is not None:
+                self.socket.connect(uri)
+            self.socket.setsockopt_unicode(zmq.SUBSCRIBE, u(''))
 
     def __del__(self):
         try:
@@ -529,7 +558,7 @@ class ExecnetChannelSubscriber(SubscriberBase):
     def __init__(self, channel):
         self.channel = channel
 
-    def recv(self, timeout=-1):
+    def recv(self, timeout=None):
         try:
             rv = self.channel.receive(timeout=timeout)
         except self.channel.RemoteError:
@@ -639,7 +668,7 @@ class SubscriberGroup(SubscriberBase):
 
         subscribers = SubscriberGroup([
             MultiProcessingSubscriber(queue),
-            ZeroMQSubscriber('tcp://localhost:5000')
+            ZeroMQSubscriber('tcp://127.0.0.1:5000')
         ])
         with target_handler:
             subscribers.dispatch_forever()
