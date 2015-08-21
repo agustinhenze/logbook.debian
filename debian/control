@@ -12,7 +12,7 @@ Build-Depends:
  python-sphinx (>= 1.0.7+dfsg) | python3-sphinx,
  python-docutils,
  python2.7-doc,
-Standards-Version: 3.9.5
+Standards-Version: 3.9.6
 X-Python-Version: >= 2.6
 X-Python3-Version: >= 3.2
 Homepage: http://pythonhosted.org/Logbook/
