@@ -3,6 +3,53 @@ Logbook Changelog
 
 Here you can see the full list of changes between each Logbook release.
 
+Version 0.10.0
+--------------
+
+Released on July 14th 2015
+
+- Removed the global handler which was installed by default so far. The rationale is to ease adoption for 3rd party libraries who don't want output to go to stderr by default. The old behavior can still be restored by setting the LOGBOOK_INSTALL_DEFAULT_HANDLER environment variable
+- Fix small Python 3 compatibility issues
+
+Version 0.9.1
+-------------
+
+Released on May 4th 2015
+
+- Minor fixes
+
+
+Version 0.9.0
+-------------
+
+Released on February 12th 2015
+
+- Added frame correction option, to properly mark log record origins (Thanks Roey Darwish)
+- Fixed MailHandler infinite recursion bug (Thanks Tal Yalon)
+
+
+Version 0.8.1
+-------------
+
+Released on November 30th 2014
+
+- Fix support for gevent, along with various other fixes (Thanks Tal Yalon)
+
+Version 0.8.0
+-------------
+
+Released on November 11th 2014. Codename "improve_some_more"
+
+- Added Pushover handler (thanks @owo)
+- Default logging format now includes seconds and microseconds (#110)
+- Several fixes regarding possible deadlocks in log formatting (thanks Guy Rozendorn)
+- Fixed packaging so that the speedups module now gets packaged by default (#122)
+- ThreadedWrapperHandler now supports maxsize (#121) (thanks Ken Jung)
+- Fixes in rotating handlers (thanks zhangliyong)
+- Added Pushover handler (thanks Ossama W. Obeid)
+- RedisHandler now supports lpush as an option (thanks Bruno Rocha)
+
+
 Version 0.7.0
 -------------
 

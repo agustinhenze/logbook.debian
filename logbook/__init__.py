@@ -10,7 +10,7 @@
     :license: BSD, see LICENSE for more details.
 """
 
-
+import os
 from logbook.base import LogRecord, Logger, LoggerGroup, NestedSetup, \
      Processor, Flags, get_level_name, lookup_level, dispatch_record, \
      CRITICAL, ERROR, WARNING, NOTICE, INFO, DEBUG, NOTSET, \
@@ -23,7 +23,7 @@ from logbook.handlers import Handler, StreamHandler, FileHandler, \
      LimitingHandlerMixin, WrapperHandler, FingersCrossedHandler, \
      GroupHandler
 
-__version__ = '0.7.0'
+__version__ = '0.10.0'
 
 # create an anonymous default logger and provide all important
 # methods of that logger as global functions
@@ -38,12 +38,11 @@ error = _default_logger.error
 exception = _default_logger.exception
 catch_exceptions = _default_logger.catch_exceptions
 critical = _default_logger.critical
-exception = _default_logger.exception
-catch_exceptions = _default_logger.catch_exceptions
 log = _default_logger.log
 del _default_logger
 
 
 # install a default global handler
-default_handler = StderrHandler()
-default_handler.push_application()
+if os.environ.get('LOGBOOK_INSTALL_DEFAULT_HANDLER'):
+    default_handler = StderrHandler()
+    default_handler.push_application()
