@@ -1,3 +1,10 @@
+logbook (0.10.0-1) unstable; urgency=medium
+
+  * Imported Upstream version 0.10.0
+  * Bumped Standard-Version to 3.9.6 (no changes required)
+
+ -- Agustin Henze <tin@debian.org>  Fri, 21 Aug 2015 17:34:58 +0200
+
 logbook (0.7.0-1) unstable; urgency=medium
 
   * Use uscan for get-orig-source target instead of wget
