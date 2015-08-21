@@ -59,6 +59,13 @@ class redirected_logging(object):
     __exit__ = end
 
 
+class LoggingCompatRecord(logbook.LogRecord):
+
+    def _format_message(self, msg, *args, **kwargs):
+        assert not kwargs
+        return msg % tuple(args)
+
+
 class RedirectLoggingHandler(logging.Handler):
     """A handler for the stdlib's logging system that redirects
     transparently to logbook.  This is used by the
@@ -93,7 +100,7 @@ class RedirectLoggingHandler(logging.Handler):
                     'pathname', 'filename', 'module', 'exc_info',
                     'exc_text', 'lineno', 'funcName', 'created',
                     'msecs', 'relativeCreated', 'thread', 'threadName',
-                    'processName', 'process'):
+                    'greenlet', 'processName', 'process'):
             rv.pop(key, None)
         return rv
 
@@ -116,10 +123,10 @@ class RedirectLoggingHandler(logging.Handler):
 
     def convert_record(self, old_record):
         """Converts an old logging record into a logbook log record."""
-        record = logbook.LogRecord(old_record.name,
+        record = LoggingCompatRecord(old_record.name,
                                    self.convert_level(old_record.levelno),
-                                   old_record.getMessage(),
-                                   None, None, old_record.exc_info,
+                                   old_record.msg, old_record.args,
+                                   None, old_record.exc_info,
                                    self.find_extra(old_record),
                                    self.find_caller(old_record))
         record.time = self.convert_time(old_record.created)

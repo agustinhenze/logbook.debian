@@ -18,21 +18,21 @@ try:
     from hashlib import sha1
 except ImportError:
     from sha import new as sha1
-import threading
 import traceback
 from datetime import datetime, timedelta
-from threading import Lock
 from collections import deque
+
+from six import add_metaclass
 
 from logbook.base import CRITICAL, ERROR, WARNING, NOTICE, INFO, DEBUG, \
      NOTSET, level_name_property, _missing, lookup_level, \
      Flags, ContextObject, ContextStackManager
 from logbook.helpers import rename, b, _is_text_stream, is_unicode, PY2, \
     zip, xrange, string_types, integer_types, reraise, u
-
+from logbook.concurrency import new_fine_grained_lock
 
 DEFAULT_FORMAT_STRING = (
-    u('[{record.time:%Y-%m-%d %H:%M}] ') +
+    u('[{record.time:%Y-%m-%d %H:%M:%S.%f}] ') +
     u('{record.level_name}: {record.channel}: {record.message}')
 )
 SYSLOG_FORMAT_STRING = u('{record.channel}: {record.message}')
@@ -107,6 +107,7 @@ class _HandlerType(type):
         return type.__new__(cls, name, bases, d)
 
 
+@add_metaclass(_HandlerType)
 class Handler(ContextObject):
     """Handler instances dispatch logging events to specific destinations.
 
@@ -115,10 +116,10 @@ class Handler(ContextObject):
     records as desired. By default, no formatter is specified; in this case,
     the 'raw' message as determined by record.message is logged.
 
-    To bind a handler you can use the :meth:`push_application` and
-    :meth:`push_thread` methods.  This will push the handler on a stack of
-    handlers.  To undo this, use the :meth:`pop_application` and
-    :meth:`pop_thread` methods::
+    To bind a handler you can use the :meth:`push_application`,
+    :meth:`push_thread` or :meth:`push_greenlet` methods.  This will push the handler on a stack of
+    handlers.  To undo this, use the :meth:`pop_application`,
+    :meth:`pop_thread` methods and :meth:`pop_greenlet`::
 
         handler = MyHandler()
         handler.push_application()
@@ -127,16 +128,7 @@ class Handler(ContextObject):
 
     By default messages sent to that handler will not go to a handler on
     an outer level on the stack, if handled.  This can be changed by
-    setting bubbling to `True`.  This setup for example would not have
-    any effect::
-
-        handler = NullHandler(bubble=True)
-        handler.push_application()
-
-    Whereas this setup disables all logging for the application::
-
-        handler = NullHandler()
-        handler.push_application()
+    setting bubbling to `True`.
 
     There are also context managers to setup the handler for the duration
     of a `with`-block::
@@ -147,14 +139,17 @@ class Handler(ContextObject):
         with handler.threadbound():
             ...
 
+        with handler.greenletbound():
+            ...
+
     Because `threadbound` is a common operation, it is aliased to a with
-    on the handler itself::
+    on the handler itself if not using gevent::
 
         with handler:
             ...
-    """
-    __metaclass__ = _HandlerType
 
+    If gevent is enabled, the handler is aliased to `greenletbound`.
+    """
     stack_manager = ContextStackManager()
 
     #: a flag for this handler that can be set to `True` for handlers that
@@ -300,8 +295,15 @@ class Handler(ContextObject):
 
 
 class NullHandler(Handler):
-    """A handler that does nothing, meant to be inserted in a handler chain
-    with ``bubble=False`` to stop further processing.
+    """A handler that does nothing.
+
+    Useful to silence logs above a certain location in the handler stack::
+
+        handler = NullHandler()
+        handler.push_application()
+
+    NullHandlers swallow all logs sent to them, and do not bubble them onwards.
+
     """
     blackhole = True
 
@@ -451,7 +453,7 @@ class LimitingHandlerMixin(HashingHandlerMixin):
 
     def __init__(self, record_limit, record_delta):
         self.record_limit = record_limit
-        self._limit_lock = Lock()
+        self._limit_lock = new_fine_grained_lock()
         self._record_limits = {}
         if record_delta is None:
             record_delta = timedelta(seconds=60)
@@ -521,7 +523,7 @@ class StreamHandler(Handler, StringFormatterHandlerMixin):
         Handler.__init__(self, level, filter, bubble)
         StringFormatterHandlerMixin.__init__(self, format_string)
         self.encoding = encoding
-        self.lock = threading.Lock()
+        self.lock = new_fine_grained_lock()
         if stream is not _missing:
             self.stream = stream
 
@@ -531,6 +533,12 @@ class StreamHandler(Handler, StringFormatterHandlerMixin):
     def __exit__(self, exc_type, exc_value, tb):
         self.close()
         return Handler.__exit__(self, exc_type, exc_value, tb)
+
+    def ensure_stream_is_open(self):
+        """this method should be overriden in sub-classes to ensure that the
+        inner stream is open
+        """
+        pass
 
     def close(self):
         """The default stream handler implementation is not to close
@@ -543,10 +551,10 @@ class StreamHandler(Handler, StringFormatterHandlerMixin):
         if self.stream is not None and hasattr(self.stream, 'flush'):
             self.stream.flush()
 
-    def format_and_encode(self, record):
-        """Formats the record and encodes it to the stream encoding."""
+    def encode(self, msg):
+        """Encodes the message to the stream encoding."""
         stream = self.stream
-        rv = self.format(record) + '\n'
+        rv = msg + '\n'
         if (PY2 and is_unicode(rv)) or \
                 not (PY2 or is_unicode(rv) or _is_text_stream(stream)):
             enc = self.encoding
@@ -560,9 +568,11 @@ class StreamHandler(Handler, StringFormatterHandlerMixin):
         self.stream.write(item)
 
     def emit(self, record):
+        msg = self.format(record)
         self.lock.acquire()
         try:
-            self.write(self.format_and_encode(record))
+            self.ensure_stream_is_open()
+            self.write(self.encode(msg))
             self.flush()
         finally:
             self.lock.release()
@@ -596,30 +606,31 @@ class FileHandler(StreamHandler):
         self.stream = open(self._filename, mode)
 
     def write(self, item):
-        if self.stream is None:
-            self._open()
+        self.ensure_stream_is_open()
         if not PY2 and isinstance(item, bytes):
             self.stream.buffer.write(item)
         else:
             self.stream.write(item)
 
     def close(self):
-        if self.stream is not None:
-            self.flush()
-            self.stream.close()
-            self.stream = None
+        self.lock.acquire()
+        try:
+            if self.stream is not None:
+                self.flush()
+                self.stream.close()
+                self.stream = None
+        finally:
+            self.lock.release()
 
-    def format_and_encode(self, record):
+    def encode(self, record):
         # encodes based on the stream settings, so the stream has to be
         # open at the time this function is called.
-        if self.stream is None:
-            self._open()
-        return StreamHandler.format_and_encode(self, record)
+        self.ensure_stream_is_open()
+        return StreamHandler.encode(self, record)
 
-    def emit(self, record):
+    def ensure_stream_is_open(self):
         if self.stream is None:
             self._open()
-        StreamHandler.emit(self, record)
 
 
 class MonitoringFileHandler(FileHandler):
@@ -655,12 +666,21 @@ class MonitoringFileHandler(FileHandler):
                 self._last_stat = st[stat.ST_DEV], st[stat.ST_INO]
 
     def emit(self, record):
-        last_stat = self._last_stat
-        self._query_fd()
-        if last_stat != self._last_stat:
-            self.close()
-        FileHandler.emit(self, record)
-        self._query_fd()
+        msg = self.format(record)
+        self.lock.acquire()
+        try:
+            last_stat = self._last_stat
+            self._query_fd()
+            if last_stat != self._last_stat and self.stream is not None:
+                self.flush()
+                self.stream.close()
+                self.stream = None
+            self.ensure_stream_is_open()
+            self.write(self.encode(msg))
+            self.flush()
+            self._query_fd()
+        finally:
+            self.lock.release()
 
 
 class StderrHandler(StreamHandler):
@@ -680,49 +700,6 @@ class StderrHandler(StreamHandler):
     @property
     def stream(self):
         return sys.stderr
-
-
-class RotatingFileHandlerBase(FileHandler):
-    """Baseclass for rotating file handlers.
-
-    .. versionchanged:: 0.3
-       This class was deprecated because the interface is not flexible
-       enough to implement proper file rotations.  The former builtin
-       subclasses no longer use this baseclass.
-    """
-
-    def __init__(self, *args, **kwargs):
-        from warnings import warn
-        warn(DeprecationWarning('This class is deprecated'))
-        FileHandler.__init__(self, *args, **kwargs)
-
-    def emit(self, record):
-        self.lock.acquire()
-        try:
-            msg = self.format_and_encode(record)
-            if self.should_rollover(record, msg):
-                self.perform_rollover()
-            self.write(msg)
-            self.flush()
-        finally:
-            self.lock.release()
-
-    def should_rollover(self, record, formatted_record):
-        """Called with the log record and the return value of the
-        :meth:`format_and_encode` method.  The method has then to
-        return `True` if a rollover should happen or `False`
-        otherwise.
-
-        .. versionchanged:: 0.3
-           Previously this method was called with the number of bytes
-           returned by :meth:`format_and_encode`
-        """
-        return False
-
-    def perform_rollover(self):
-        """Called if :meth:`should_rollover` returns `True` and has
-        to perform the actual rollover.
-        """
 
 
 class RotatingFileHandler(FileHandler):
@@ -768,9 +745,10 @@ class RotatingFileHandler(FileHandler):
         self._open('w')
 
     def emit(self, record):
+        msg = self.format(record)
         self.lock.acquire()
         try:
-            msg = self.format_and_encode(record)
+            msg = self.encode(msg)
             if self.should_rollover(record, len(msg)):
                 self.perform_rollover()
             self.write(msg)
@@ -832,7 +810,8 @@ class TimedRotatingFileHandler(FileHandler):
                filename.endswith(self._fn_parts[1]):
                 files.append((os.path.getmtime(filename), filename))
         files.sort()
-        return files[:-self.backup_count + 1]
+        return files[:-self.backup_count + 1] if self.backup_count > 1\
+                else files[:]
 
     def perform_rollover(self):
         self.stream.close()
@@ -842,11 +821,12 @@ class TimedRotatingFileHandler(FileHandler):
         self._open('w')
 
     def emit(self, record):
+        msg = self.format(record)
         self.lock.acquire()
         try:
             if self.should_rollover(record):
                 self.perform_rollover()
-            self.write(self.format_and_encode(record))
+            self.write(self.encode(msg))
             self.flush()
         finally:
             self.lock.release()
@@ -1199,7 +1179,7 @@ class MailHandler(Handler, StringFormatterHandlerMixin,
 
     def emit_batch(self, records, reason):
         if reason not in ('escalation', 'group'):
-            return MailHandler.emit_batch(self, records, reason)
+            raise RuntimeError("reason must be either 'escalation' or 'group'")
         records = list(records)
         if not records:
             return
@@ -1496,7 +1476,7 @@ class FingersCrossedHandler(Handler):
     handler when a severity theshold was reached with the buffer emitting.
     This now enables this logger to be properly used with the
     :class:`~logbook.MailHandler`.  You will now only get one mail for
-    each bfufered record.  However once the threshold was reached you would
+    each buffered record.  However once the threshold was reached you would
     still get a mail for each record which is why the `reset` flag was added.
 
     When set to `True`, the handler will instantly reset to the untriggered
@@ -1520,7 +1500,7 @@ class FingersCrossedHandler(Handler):
                  pull_information=True, reset=False, filter=None,
                  bubble=False):
         Handler.__init__(self, NOTSET, filter, bubble)
-        self.lock = Lock()
+        self.lock = new_fine_grained_lock()
         self._level = action_level
         if isinstance(handler, Handler):
             self._handler = handler
@@ -1624,6 +1604,10 @@ class GroupHandler(WrapperHandler):
 
     def pop_thread(self):
         Handler.pop_thread(self)
+        self.rollover()
+
+    def pop_greenlet(self):
+        Handler.pop_greenlet(self)
         self.rollover()
 
     def emit(self, record):

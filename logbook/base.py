@@ -10,16 +10,12 @@
 """
 import os
 import sys
-try:
-    import thread
-except ImportError:
-    # for python 3.1,3.2
-    import _thread as thread
-import threading
 import traceback
 from itertools import chain
 from weakref import ref as weakref
 from datetime import datetime
+from logbook import helpers
+from logbook.concurrency import thread_get_name, thread_get_ident, greenlet_get_ident
 
 from logbook.helpers import to_safe_json, parse_iso8601, cached_property, \
      PY2, u, string_types, iteritems, integer_types
@@ -190,6 +186,15 @@ class ContextObject(StackedObject):
     #: subclasses of it.
     stack_manager = None
 
+    def push_greenlet(self):
+        """Pushes the context object to the greenlet stack."""
+        self.stack_manager.push_greenlet(self)
+
+    def pop_greenlet(self):
+        """Pops the context object from the stack."""
+        popped = self.stack_manager.pop_greenlet()
+        assert popped is self, 'popped unexpected object'
+
     def push_thread(self):
         """Pushes the context object to the thread stack."""
         self.stack_manager.push_thread(self)
@@ -232,6 +237,14 @@ class NestedSetup(StackedObject):
     def pop_thread(self):
         for obj in reversed(self.objects):
             obj.pop_thread()
+
+    def push_greenlet(self):
+        for obj in self.objects:
+            obj.push_greenlet()
+
+    def pop_greenlet(self):
+        for obj in reversed(self.objects):
+            obj.pop_greenlet()
 
 
 class Processor(ContextObject):
@@ -330,7 +343,7 @@ class LogRecord(object):
     """
     _pullable_information = frozenset((
         'func_name', 'module', 'filename', 'lineno', 'process_name', 'thread',
-        'thread_name', 'formatted_exception', 'message', 'exception_name',
+        'thread_name', 'greenlet', 'formatted_exception', 'message', 'exception_name',
         'exception_message'
     ))
     _noned_on_close = frozenset(('exc_info', 'frame', 'calling_frame'))
@@ -356,7 +369,7 @@ class LogRecord(object):
     information_pulled = False
 
     def __init__(self, channel, level, msg, args=None, kwargs=None,
-                 exc_info=None, extra=None, frame=None, dispatcher=None):
+                 exc_info=None, extra=None, frame=None, dispatcher=None, frame_correction=0):
         #: the name of the logger that created it or any other textual
         #: channel description.  This is a descriptive name and can be
         #: used for filtering.
@@ -384,6 +397,11 @@ class LogRecord(object):
         #: Might not be available for all calls and is removed when the log
         #: record is closed.
         self.frame = frame
+        #: A positive integer telling the number of frames to go back from
+        #: the frame which triggered the log entry. This is mainly useful
+        #: for decorators that want to show that the log was emitted from
+        #: form the function they decorate
+        self.frame_correction = frame_correction
         #: the PID of the current process
         self.process = None
         if dispatcher is not None:
@@ -477,6 +495,12 @@ class LogRecord(object):
         self.extra = ExtraDict(self.extra)
         return self
 
+    def _format_message(self, msg, *args, **kwargs):
+        """Called if the record's message needs to be formatted.
+        Subclasses can implement their own formatting.
+        """
+        return msg.format(*args, **kwargs)
+
     @cached_property
     def message(self):
         """The formatted message."""
@@ -484,11 +508,11 @@ class LogRecord(object):
             return self.msg
         try:
             try:
-                return self.msg.format(*self.args, **self.kwargs)
+                return self._format_message(self.msg, *self.args, **self.kwargs)
             except UnicodeDecodeError:
                 # Assume an unicode message but mixed-up args
                 msg = self.msg.encode('utf-8', 'replace')
-                return msg.format(*self.args, **self.kwargs)
+                return self._format_message(msg, *self.args, **self.kwargs)
             except (UnicodeEncodeError, AttributeError):
                 # we catch AttributeError since if msg is bytes, it won't have the 'format' method
                 if sys.exc_info()[0] is AttributeError and (PY2 or not isinstance(self.msg, bytes)):
@@ -499,7 +523,7 @@ class LogRecord(object):
                 # but this codepath is unlikely (if the message is a constant
                 # string in the caller's source file)
                 msg = self.msg.decode('utf-8', 'replace')
-                return msg.format(*self.args, **self.kwargs)
+                return self._format_message(msg, *self.args, **self.kwargs)
 
         except Exception:
             # this obviously will not give a proper error message if the
@@ -530,6 +554,10 @@ class LogRecord(object):
         globs = globals()
         while frm is not None and frm.f_globals is globs:
             frm = frm.f_back
+
+        for _ in helpers.xrange(self.frame_correction):
+            frm = frm.f_back
+
         return frm
 
     @cached_property
@@ -574,12 +602,20 @@ class LogRecord(object):
             return cf.f_lineno
 
     @cached_property
+    def greenlet(self):
+        """The ident of the greenlet.  This is evaluated late and means that
+        if the log record is passed to another greenlet, :meth:`pull_information`
+        was called in the old greenlet.
+        """
+        return greenlet_get_ident()
+
+    @cached_property
     def thread(self):
         """The ident of the thread.  This is evaluated late and means that
         if the log record is passed to another thread, :meth:`pull_information`
         was called in the old thread.
         """
-        return thread.get_ident()
+        return thread_get_ident()
 
     @cached_property
     def thread_name(self):
@@ -587,7 +623,7 @@ class LogRecord(object):
         if the log record is passed to another thread, :meth:`pull_information`
         was called in the old thread.
         """
-        return threading.currentThread().getName()
+        return thread_get_name()
 
     @cached_property
     def process_name(self):
@@ -608,7 +644,7 @@ class LogRecord(object):
         """The formatted exception which caused this record to be created
         in case there was any.
         """
-        if self.exc_info is not None:
+        if self.exc_info is not None and self.exc_info != (None, None, None):
             rv = ''.join(traceback.format_exception(*self.exc_info))
             if PY2:
                 rv = rv.decode('utf-8', 'replace')
@@ -632,7 +668,10 @@ class LogRecord(object):
         if self.exc_info is not None:
             val = self.exc_info[1]
             try:
-                return u(str(val))
+                if PY2:
+                    return unicode(val)
+                else:
+                    return str(val)
             except UnicodeError:
                 return str(val).decode('utf-8', 'replace')
 
@@ -748,8 +787,9 @@ class LoggerMixin(object):
     def _log(self, level, args, kwargs):
         exc_info = kwargs.pop('exc_info', None)
         extra = kwargs.pop('extra', None)
+        frame_correction = kwargs.pop('frame_correction', 0)
         self.make_record_and_handle(level, args[0], args[1:], kwargs,
-                                    exc_info, extra)
+                                    exc_info, extra, frame_correction)
 
 
 class RecordDispatcher(object):
@@ -786,7 +826,7 @@ class RecordDispatcher(object):
             self.call_handlers(record)
 
     def make_record_and_handle(self, level, msg, args, kwargs, exc_info,
-                               extra):
+                               extra, frame_correction):
         """Creates a record from some given arguments and heads it
         over to the handling system.
         """
@@ -800,7 +840,7 @@ class RecordDispatcher(object):
             channel = self
 
         record = LogRecord(self.name, level, msg, args, kwargs, exc_info,
-                           extra, None, channel)
+                           extra, None, channel, frame_correction)
 
         # after handling the log record is closed which will remove some
         # referenes that would require a GC run on cpython.  This includes
@@ -843,25 +883,9 @@ class RecordDispatcher(object):
             if not handler.should_handle(record):
                 continue
 
-            # a filter can still veto the handling of the record.  This
-            # however is already operating on an initialized and processed
-            # record.  The impact is that filters are slower than the
-            # handler's should_handle function in case there is no default
-            # handler that would handle the record (delayed init).
-            if handler.filter is not None \
-               and not handler.filter(record, handler):
-                continue
-
-            # if this is a blackhole handler, don't even try to
-            # do further processing, stop right away.  Technically
-            # speaking this is not 100% correct because if the handler
-            # is bubbling we shouldn't apply this logic, but then we
-            # won't enter this branch anyways.  The result is that a
-            # bubbling blackhole handler will never have this shortcut
-            # applied and do the heavy init at one point.  This is fine
-            # however because a bubbling blackhole handler is not very
-            # useful in general.
-            if handler.blackhole:
+            # first case of blackhole (without filter).
+            # this should discard all further processing and we don't have to heavy_init to know that...
+            if handler.filter is None and handler.blackhole:
                 break
 
             # we are about to handle the record.  If it was not yet
@@ -872,6 +896,22 @@ class RecordDispatcher(object):
                 record.heavy_init()
                 self.process_record(record)
                 record_initialized = True
+
+
+            # a filter can still veto the handling of the record.  This
+            # however is already operating on an initialized and processed
+            # record.  The impact is that filters are slower than the
+            # handler's should_handle function in case there is no default
+            # handler that would handle the record (delayed init).
+            if handler.filter is not None \
+               and not handler.filter(record, handler):
+                continue
+
+            # We might have a filter, so now that we know we *should* handle
+            # this record, we should consider the case of us being a black hole...
+            if handler.blackhole:
+                break
+
 
             # handle the record.  If the record was handled and
             # the record is not bubbling we can abort now.

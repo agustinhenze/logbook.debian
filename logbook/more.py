@@ -12,6 +12,7 @@ import re
 import os
 from collections import defaultdict
 from cgi import parse_qsl
+from functools import partial
 
 from logbook.base import RecordDispatcher, dispatch_record, NOTSET, ERROR, NOTICE
 from logbook.handlers import Handler, StringFormatter, \
@@ -104,8 +105,8 @@ class TaggingLogger(RecordDispatcher):
     def __init__(self, name=None, tags=None):
         RecordDispatcher.__init__(self, name)
         # create a method for each tag named
-        list(setattr(self, tag, lambda msg, *args, **kwargs:
-            self.log(tag, msg, *args, **kwargs)) for tag in (tags or ()))
+        for tag in (tags or ()):
+            setattr(self, tag, partial(self.log, tag))
 
     def log(self, tags, msg, *args, **kwargs):
         if isinstance(tags, string_types):
@@ -113,8 +114,9 @@ class TaggingLogger(RecordDispatcher):
         exc_info = kwargs.pop('exc_info', None)
         extra = kwargs.pop('extra', {})
         extra['tags'] = list(tags)
+        frame_correction = kwargs.pop('frame_correction', 0)
         return self.make_record_and_handle(NOTSET, msg, args, kwargs,
-                                           exc_info, extra)
+                                           exc_info, extra, frame_correction)
 
 
 class TaggingHandler(Handler):
@@ -304,9 +306,8 @@ class ColorizingStreamHandlerMixin(object):
             return 'yellow'
         return 'lightgray'
 
-    def format_and_encode(self, record):
-        rv = super(ColorizingStreamHandlerMixin, self) \
-                .format_and_encode(record)
+    def format(self, record):
+        rv = super(ColorizingStreamHandlerMixin, self).format(record)
         if self.should_colorize(record):
             color = self.get_color(record)
             if color:
@@ -379,7 +380,7 @@ class DedupHandler(Handler):
         Handler.__init__(self, bubble=False, *args, **kwargs)
         self._format_string = format_string
         self.clear()
-        
+
     def clear(self):
         self._message_to_count = defaultdict(int)
         self._unique_ordered_records = []
@@ -390,6 +391,10 @@ class DedupHandler(Handler):
 
     def pop_thread(self):
         Handler.pop_thread(self)
+        self.flush()
+
+    def pop_greenlet(self):
+        Handler.pop_greenlet(self)
         self.flush()
 
     def handle(self, record):

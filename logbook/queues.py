@@ -17,9 +17,9 @@ from logbook.handlers import Handler, WrapperHandler
 from logbook.helpers import PY2, u
 
 if PY2:
-    from Queue import Empty, Queue as ThreadQueue
+    from Queue import Empty, Full, Queue as ThreadQueue
 else:
-    from queue import Empty, Queue as ThreadQueue
+    from queue import Empty, Full, Queue as ThreadQueue
 
 
 class RedisHandler(Handler):
@@ -44,7 +44,7 @@ class RedisHandler(Handler):
     """
     def __init__(self, host='127.0.0.1', port=6379, key='redis', extra_fields={},
                 flush_threshold=128, flush_time=1, level=NOTSET, filter=None,
-                password=False, bubble=True, context=None):
+                password=False, bubble=True, context=None, push_method='rpush'):
         Handler.__init__(self, level, filter, bubble)
         try:
             import redis
@@ -63,6 +63,7 @@ class RedisHandler(Handler):
         self.flush_threshold = flush_threshold
         self.queue = []
         self.lock = Lock()
+        self.push_method = push_method
 
         #Set up a thread that flushes the queue every specified seconds
         self._stop_event = threading.Event()
@@ -85,9 +86,11 @@ class RedisHandler(Handler):
         """Flushes the messaging queue into Redis.
 
         All values are pushed at once for the same key.
+
+        The method rpush/lpush is defined by push_method argument
         """
         if self.queue:
-            self.redis.rpush(self.key, *self.queue)
+            getattr(self.redis, self.push_method)(self.key, *self.queue)
         self.queue = []
 
 
@@ -108,7 +111,10 @@ class RedisHandler(Handler):
         are also appended to the message.
         """
         with self.lock:
-            r = {"message": record.msg, "host": platform.node(), "level": record.level_name}
+            r = {"message": record.msg,
+                 "host": platform.node(),
+                 "level": record.level_name,
+                 "time": record.time.isoformat()}
             r.update(self.extra_fields)
             r.update(record.kwargs)
             self.queue.append(json.dumps(r))
@@ -208,8 +214,17 @@ class ZeroMQHandler(Handler):
     def emit(self, record):
         self.socket.send(json.dumps(self.export_record(record)).encode("utf-8"))
 
-    def close(self):
-        self.socket.close()
+    def close(self, linger=-1):
+        self.socket.close(linger)
+
+    def __del__(self):
+        # When the Handler is deleted we must close our socket in a non-blocking
+        # fashion (using linger).
+        # Otherwise it can block indefinitely, for example if the Subscriber is
+        # not reachable.
+        # If messages are pending on the socket, we wait 100ms for them to be sent
+        # then we discard them.
+        self.close(linger=100)
 
 
 class ThreadController(object):
@@ -623,9 +638,9 @@ class ThreadedWrapperHandler(WrapperHandler):
     """
     _direct_attrs = frozenset(['handler', 'queue', 'controller'])
 
-    def __init__(self, handler):
+    def __init__(self, handler, maxsize=0):
         WrapperHandler.__init__(self, handler)
-        self.queue = ThreadQueue(-1)
+        self.queue = ThreadQueue(maxsize)
         self.controller = TWHThreadController(self)
         self.controller.start()
 
@@ -634,7 +649,11 @@ class ThreadedWrapperHandler(WrapperHandler):
         self.handler.close()
 
     def emit(self, record):
-        self.queue.put_nowait(record)
+        try:
+            self.queue.put_nowait(record)
+        except Full:
+            # silently drop
+            pass
 
 
 class GroupMember(ThreadController):
